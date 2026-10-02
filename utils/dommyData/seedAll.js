@@ -8,6 +8,8 @@ const dotenv = require('dotenv');
 const slugify = require('slugify');
 // eslint-disable-next-line import/no-extraneous-dependencies
 const sharp = require('sharp');
+// eslint-disable-next-line import/no-extraneous-dependencies
+const { v4: uuidv4 } = require('uuid');
 require('colors');
 
 const ROOT = path.join(__dirname, '../..');
@@ -23,19 +25,44 @@ const Coupon = require('../../models/couponModel');
 const Cart = require('../../models/cartModel');
 const Order = require('../../models/orderModel');
 const Branch = require('../../models/branchModel');
+const { toFileName } = require('../imageUrl');
 
 const data = JSON.parse(fs.readFileSync(path.join(__dirname, 'dummyData.json')));
 
 const IMAGES_DIR = path.join(ROOT, 'images');
 const UPLOADS_DIR = path.join(ROOT, 'uploads');
 
-// copy image from /images to /uploads/<folder> and return the stored file name
-const copyImage = (file, folder) => {
-  const name = `seed-${path.basename(file)}`;
+const white = { r: 255, g: 255, b: 255, alpha: 1 };
+
+// same name prefix + sharp pipeline as the upload handlers in /services
+const IMAGE_STYLES = {
+  categories: { prefix: 'category', size: 600, quality: 95 },
+  brands: { prefix: 'brands', size: 600, quality: 95, contain: true },
+  products: { prefix: 'products', size: 1000, quality: 90, contain: true },
+  users: { prefix: 'Users', size: 600, quality: 95 },
+};
+
+// process image from /images into /uploads/<folder> exactly like an API upload
+// and return the stored file name, e.g. Users-<uuid>-<timestamp>.jpeg
+const saveImage = async (file, folder, suffix = '') => {
+  const { prefix, size, quality, contain } = IMAGE_STYLES[folder];
+  const name = `${prefix}-${uuidv4()}-${Date.now()}${suffix}.jpeg`;
   const dest = path.join(UPLOADS_DIR, folder);
   fs.mkdirSync(dest, { recursive: true });
-  fs.copyFileSync(path.join(IMAGES_DIR, file), path.join(dest, name));
+  let image = sharp(path.join(IMAGES_DIR, file));
+  image = contain
+    ? image.resize(size, size, { fit: 'contain', background: white }).flatten({ background: '#ffffff' })
+    : image.resize(size, size);
+  await image.toFormat('jpeg').jpeg({ quality }).toFile(path.join(dest, name));
   return name;
+};
+
+// delete stored images of old dummy data so re-running the seed does not pile up files
+const removeImages = (folder, names) => {
+  names.filter(Boolean).forEach((value) => {
+    const target = path.join(UPLOADS_DIR, folder, toFileName(value));
+    if (fs.existsSync(target)) fs.unlinkSync(target);
+  });
 };
 
 const slug = (s) => slugify(s, { lower: true, strict: true });
@@ -70,10 +97,23 @@ const ensureBrandLogo = async (brand) => {
 };
 
 const destroyData = async () => {
-  const users = await User.find({ email: { $in: data.users.map((u) => u.email) } }).select('_id');
+  const users = await User.find({ email: { $in: data.users.map((u) => u.email) } })
+    .select('_id profileImg')
+    .lean();
   const userIds = users.map((u) => u._id);
-  const products = await Product.find({ title: { $in: data.products.map((p) => p.title) } }).select('_id');
+  const products = await Product.find({ title: { $in: data.products.map((p) => p.title) } })
+    .select('_id imageCover images')
+    .lean();
   const productIds = products.map((p) => p._id);
+  const brands = await Brand.find({ name: { $in: data.brands.map((b) => b.name) } }).select('image').lean();
+  const categories = await Category.find({ name: { $in: data.categories.map((c) => c.name) } })
+    .select('image')
+    .lean();
+
+  removeImages('users', users.map((u) => u.profileImg));
+  removeImages('products', products.flatMap((p) => [p.imageCover, ...(p.images || [])]));
+  removeImages('brands', brands.map((b) => b.image));
+  removeImages('categories', categories.map((c) => c.image));
 
   await Order.deleteMany({ user: { $in: userIds } });
   await Cart.deleteMany({ user: { $in: userIds } });
@@ -93,12 +133,14 @@ const insertData = async () => {
 
   // Categories
   const categories = await Category.insertMany(
-    data.categories.map((c) => ({
-      name: c.name,
-      nameAr: c.nameAr,
-      slug: slug(c.name),
-      image: copyImage(c.image, 'categories'),
-    }))
+    await Promise.all(
+      data.categories.map(async (c) => ({
+        name: c.name,
+        nameAr: c.nameAr,
+        slug: slug(c.name),
+        image: await saveImage(c.image, 'categories'),
+      }))
+    )
   );
   const categoryId = (name) => categories.find((c) => c.name === name)._id;
   console.log(`Categories: ${categories.length}`.cyan);
@@ -121,7 +163,7 @@ const insertData = async () => {
   for (const b of data.brands) {
     // eslint-disable-next-line no-await-in-loop
     const logo = await ensureBrandLogo(b);
-    brandDocs.push({ name: b.name, nameAr: b.nameAr, slug: slug(b.name), image: copyImage(logo, 'brands') });
+    brandDocs.push({ name: b.name, nameAr: b.nameAr, slug: slug(b.name), image: await saveImage(logo, 'brands') });
   }
   const brands = await Brand.insertMany(brandDocs);
   const brandId = (name) => brands.find((b) => b.name === name)._id;
@@ -129,7 +171,7 @@ const insertData = async () => {
 
   // Products
   const products = await Product.insertMany(
-    data.products.map((p) => ({
+    await Promise.all(data.products.map(async (p) => ({
       title: p.title,
       titleAr: p.titleAr,
       slug: slug(p.title),
@@ -145,12 +187,12 @@ const insertData = async () => {
       price: p.price,
       priceAfterDiscount: p.priceAfterDiscount,
       colors: p.colors,
-      imageCover: copyImage(p.cover, 'products'),
-      images: p.images.map((img) => copyImage(img, 'products')),
+      imageCover: await saveImage(p.cover, 'products', '-cover'),
+      images: await Promise.all(p.images.map((img, index) => saveImage(img, 'products', `-${index + 1}`))),
       category: categoryId(p.category),
       subcategories: [subId(p.sub)],
       brand: brandId(p.brand),
-    }))
+    })))
   );
   console.log(`Products: ${products.length}`.cyan);
 
@@ -162,17 +204,17 @@ const insertData = async () => {
     postalCode: `1${i}000`,
   });
   const users = await User.create(
-    data.users.map((u, i) => ({
+    await Promise.all(data.users.map(async (u, i) => ({
       name: u.name,
       email: u.email,
       role: u.role,
       slug: slug(u.name),
       password: data.userPassword,
       phone: `0100000000${i}`,
-      profileImg: copyImage(u.image, 'users'),
+      profileImg: await saveImage(u.image, 'users'),
       wishlist: [products[i % products.length]._id, products[(i + 7) % products.length]._id],
       addresses: [{ id: new mongoose.Types.ObjectId(), alias: 'home', ...addressOf(u, i) }],
-    }))
+    })))
   );
   const shoppers = users.filter((u) => u.role === 'user');
   console.log(`Users: ${users.length}`.cyan);
