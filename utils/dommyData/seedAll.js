@@ -8,8 +8,6 @@ const dotenv = require('dotenv');
 const slugify = require('slugify');
 // eslint-disable-next-line import/no-extraneous-dependencies
 const sharp = require('sharp');
-// eslint-disable-next-line import/no-extraneous-dependencies
-const { v4: uuidv4 } = require('uuid');
 require('colors');
 
 const ROOT = path.join(__dirname, '../..');
@@ -26,36 +24,14 @@ const Cart = require('../../models/cartModel');
 const Order = require('../../models/orderModel');
 const Branch = require('../../models/branchModel');
 const { toFileName } = require('../imageUrl');
+const { UPLOADS_DIR, saveImage: saveUpload } = require('./seedImages');
 
 const data = JSON.parse(fs.readFileSync(path.join(__dirname, 'dummyData.json')));
 
 const IMAGES_DIR = path.join(ROOT, 'images');
-const UPLOADS_DIR = path.join(ROOT, 'uploads');
-
-const white = { r: 255, g: 255, b: 255, alpha: 1 };
-
-// same name prefix + sharp pipeline as the upload handlers in /services
-const IMAGE_STYLES = {
-  categories: { prefix: 'category', size: 600, quality: 95 },
-  brands: { prefix: 'brands', size: 600, quality: 95, contain: true },
-  products: { prefix: 'products', size: 1000, quality: 90, contain: true },
-  users: { prefix: 'Users', size: 600, quality: 95 },
-};
 
 // process image from /images into /uploads/<folder> exactly like an API upload
-// and return the stored file name, e.g. Users-<uuid>-<timestamp>.jpeg
-const saveImage = async (file, folder, suffix = '') => {
-  const { prefix, size, quality, contain } = IMAGE_STYLES[folder];
-  const name = `${prefix}-${uuidv4()}-${Date.now()}${suffix}.jpeg`;
-  const dest = path.join(UPLOADS_DIR, folder);
-  fs.mkdirSync(dest, { recursive: true });
-  let image = sharp(path.join(IMAGES_DIR, file));
-  image = contain
-    ? image.resize(size, size, { fit: 'contain', background: white }).flatten({ background: '#ffffff' })
-    : image.resize(size, size);
-  await image.toFormat('jpeg').jpeg({ quality }).toFile(path.join(dest, name));
-  return name;
-};
+const saveImage = (file, folder, suffix) => saveUpload(path.join(IMAGES_DIR, file), folder, suffix);
 
 // delete stored images of old dummy data so re-running the seed does not pile up files
 const removeImages = (folder, names) => {

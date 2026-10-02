@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "nodemon index.js",
     "seed": "node utils/dommyData/seedAll.js -i",
-    "seed:destroy": "node utils/dommyData/seedAll.js -d"
+    "seed:destroy": "node utils/dommyData/seedAll.js -d",
+    "images:rename": "node utils/dommyData/renameImages.js"
   },
   "keywords": [],
   "author": "",
